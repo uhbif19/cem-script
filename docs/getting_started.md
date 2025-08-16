@@ -1,17 +1,18 @@
-# Usage and Examples
+# How to create a CEM Script tutorial (example for simple auction)
 
-## How to define a script
+## Plan
 
-- Define an empty type for your script: `data MyScript`, where MyScript can be any name.
-- Define a `CEMScript` instance for it by providing `Params`, `State`, `Transition`, `transitionSpec`, and optionally `transitionComp`.
-- Do Template Haskell derivations (`deriveCEMAssociatedTypes`) to generate data and spine instances for pattern matching.
-- Invoke the `compileCEM` function (e.g., `$(compileCEM True ''MyScript)`) to process the DSL specification, compile optional `transitionComp` code, and produce a `CEMScriptCompiled` instance.
-    - This generates an instance of `CEMScriptCompiled` for your script type.
-    - You may invoke `cemScriptCompiled` on your script type to get an instance of `Plutarch.Script`
+* Define an empty type for your script: `data MyScript`, where MyScript can be any name.
+* Define types for `CEMScript MyScript` instance: `Params`, `State`, `Transition`
+* Define how script transitions work via `transitionSpec`, and optionally `transitionComp`.
+* Invoke TH utils to compile your script
+* Use generated `CEMScriptCompiled` instance for:
+  * Saving compiled on-chain scripts
+  * Sending transactions with them from Haskell code
+  * Parsing Txs
+* You can invoke more TH functions to generate state-diagram
 
-## Example: Simple Auction
-
-### Setup: The Types
+## Defining types
 
 First, we define a type to denote our script. It’s an uninhabited type, it can’t be constructed.
 It’s only used as a tag for connecting all instances of type classes together.
@@ -87,7 +88,7 @@ This is why we need to do `derivePlutusSpine` for the `Bid` type ourselves.
 
 The boolean argument to `deriveCEMAssociatedTypes` is unused for now, and it is recommended to use a value of `False`.
 
-### Implementation
+### Defining transition logic
 
 To implement the logic of our script, we define an instance of `CEMScript` for our script type `SimpleAuction`
 
