@@ -1,6 +1,240 @@
-# CEM Script's getting started guide
+# Usage and Examples
 
-## Basic Concepts
+## How to define a script
+
+- Define an empty type for your script: `data MyScript`, where MyScript can be any name.
+- Define a `CEMScript` instance for it by providing `Params`, `State`, `Transition`, `transitionSpec`, and optionally `transitionComp`.
+- Do Template Haskell derivations (`deriveCEMAssociatedTypes`) to generate data and spine instances for pattern matching.
+- Invoke the `compileCEM` function (e.g., `$(compileCEM True ''MyScript)`) to process the DSL specification, compile optional `transitionComp` code, and produce a `CEMScriptCompiled` instance.
+    - This generates an instance of `CEMScriptCompiled` for your script type.
+    - You may invoke `cemScriptCompiled` on your script type to get an instance of `Plutarch.Script`
+
+## Example: Simple Auction
+
+### Setup: The Types
+
+First, we define a type to denote our script. It’s an uninhabited type, it can’t be constructed.
+It’s only used as a tag for connecting all instances of type classes together.
+
+```haskell
+data SimpleAuction
+```
+
+We define a type for the read-only state of our script. This state can’t be modified once created.
+This becomes the `Params` associated type of the `CEMScript` type class.
+
+```haskell
+data SimpleAuctionParams = MkAuctionParams
+  { seller :: PubKeyHash,
+    lot :: Value
+  }
+  deriving stock (Prelude.Eq, Prelude.Show)
+```
+
+We define a type for the evolving state of our script. This becomes the `State` associated type of the `CEMScript` type class.
+
+```haskell
+data Bid = MkBid
+  { bidder :: PubKeyHash,
+    bidAmount :: Integer
+  }
+  deriving stock (Prelude.Eq, Prelude.Show)
+
+derivePlutusSpine ''Bid -- This will be explained below.
+
+data SimpleAuctionState
+  = NotStarted
+  | CurrentBid
+      { bid :: Bid
+      }
+  | Winner
+      { bid :: Bid
+      }
+  deriving stock (Prelude.Eq, Prelude.Show)
+```
+
+Lastly, we define a type for the state transitions of our script. This becomes the `Transition` associated type of the `CEMScript` type class.
+
+```haskell
+data SimpleAuctionTransition
+  = Create
+  | Start
+  | MakeBid
+      { bid :: Bid
+      }
+  | Close
+  | Buyout
+  deriving stock (Prelude.Eq, Prelude.Show)
+```
+
+We can now define an instance of the `CEMScriptTypes` for `SimpleAuction`.
+`CEMScriptTypes` is a superclass of `CEMScript`, which just includes the associated types.
+By defining the associated types separately, we can use the `deriveCEMAssociatedTypes`
+Template Haskell function to generate some boilerplate.
+
+```haskell
+instance CEMScriptTypes SimpleAuction where
+  type Params SimpleAuction = SimpleAuctionParams
+  type State SimpleAuction = SimpleAuctionState
+  type Transition SimpleAuction = SimpleAuctionTransition
+
+$(deriveCEMAssociatedTypes False ''SimpleAuction)
+```
+
+`deriveCEMAssociatedTypes` just executes `derivePlutusSpine` for all three of the associated types.
+But it can only do that if all the members of a type have a `HasPlutusSpine` implementation.
+This is why we need to do `derivePlutusSpine` for the `Bid` type ourselves.
+
+The boolean argument to `deriveCEMAssociatedTypes` is unused for now, and it is recommended to use a value of `False`.
+
+### Implementation
+
+To implement the logic of our script, we define an instance of `CEMScript` for our script type `SimpleAuction`
+
+```haskell
+instance CEMScript SimpleAuction where
+```
+
+We provide a value for `compilationConfig`, which at the moment contains
+only a prefix for error codes to tell errors from different programs apart.
+
+```haskell
+  compilationConfig = MkCompilationConfig "AUC"
+```
+
+Next comes the meat of the script: `transitionSpec`. This is where we define state transitions
+
+We create a Map of `Spine (Transition script)` → `[TxConstraint False script]`
+
+```haskell
+  transitionSpec = Map.fromList
+    [ .. ]
+```
+
+Before we go into the entries in detail, let’s define some helpers:
+
+```haskell
+buyoutBid = ctxState.bid
+
+initialBid =
+  cOfSpine
+    MkBetSpine
+    [ #bidder ::= ctxParams.seller
+    , #bidAmount ::= lift 0
+    ]
+
+auctionValue = cMinLovelace @<> ctxParams.lot
+```
+
+We make extensive use of `OverloadedRecordDot` and custom `HasField` instances to make accessing the fields of the params and state values ergonomic.
+
+Let’s examine each of the entries in the map in detail.
+
+1. Create
+
+    ```haskell
+    ( CreateSpine
+    ,
+      [ spentBy ctxParams.seller cMinLovelace cEmptyValue
+      , output (ownUtxo $ withNullaryState NotStartedSpine) auctionValue
+      ]
+    )
+    ```
+
+2. Start
+
+    ```haskell
+    ( StartSpine
+    ,
+      [ input (ownUtxo $ inState NotStartedSpine) auctionValue
+      , output (ownUtxo $ withState CurrentBidSpine [#bid ::= initialBid]) auctionValue
+      , signedBy ctxParams.seller
+      ]
+    )
+    ```
+
+3. MakeBid
+
+    ```haskell
+    ( MakeBidSpine
+    ,
+      [ input (ownUtxo $ inState CurrentBidSpine) auctionValue
+      , byFlagError
+          (ctxTransition.bid.bidAmount @<= ctxState.bid.bidAmount)
+          "Bid amount is less or equal to current bid"
+      , output
+          ( ownUtxo
+              $ withState
+                CurrentBidSpine
+                [#bid ::= ctxTransition.bid]
+          )
+          auctionValue
+      , signedBy ctxTransition.bid.bidder
+      ]
+    )
+    ```
+
+4. Close
+
+    ```haskell
+    ( CloseSpine
+    ,
+      [ input (ownUtxo $ inState CurrentBidSpine) auctionValue
+      , output
+          ( ownUtxo
+              $ withState WinnerSpine [#bid ::= ctxState.bid]
+          )
+          auctionValue
+      , signedBy ctxParams.seller
+      ]
+    )
+    ```
+
+5. Buyout
+
+    ```haskell
+    ( BuyoutSpine
+    ,
+      [ input (ownUtxo $ inState WinnerSpine) auctionValue
+      , byFlagError (lift False) "Some err"
+      , byFlagError (lift False) "Another err"
+      , -- Example: In constraints redundant for on-chain
+        offchainOnly
+          (if'
+            (ctxParams.seller `eq'` buyoutBid.bidder)
+            (signedBy ctxParams.seller)
+            (spentBy
+              buyoutBid.bidder
+              (cMinLovelace @<> cMkAdaOnlyValue buyoutBid.bidAmount)
+              cEmptyValue
+            )
+          )
+      , output
+          (userUtxo buyoutBid.bidder) -- NOTE: initial zero bidder is seller
+          auctionValue
+      , if'
+          (ctxParams.seller `eq'` buyoutBid.bidder)
+          noop
+          ( output
+            (userUtxo ctxParams.seller)
+            (cMinLovelace @<> cMkAdaOnlyValue buyoutBid.bidAmount)
+          )
+      ]
+    )
+    ```
+
+### Generating state diagram
+
+Use `genCemGraph` function from `Cardano.CEM.Documentation` module
+to produce `graphviz` definition:
+
+```bash
+$ cabal repl cem-script-example
+ghci> :m +System.IO Cardano.CEM CEM.Example.Auction Data.Proxy
+ghci> withFile "auction_diagram.dot" WriteMode (\h -> hPutStrLn h (genCemGraph "CEM Simple Acutoin" (Proxy :: Proxy SimpleAuction)))
+```
+
+# Main Concepts
 
 An instance of `CEMScript` revolves primarily around the following two type classes.
 
@@ -59,7 +293,7 @@ type CEMScriptSpec resolved script =
   )
 ```
 
-### Spine
+## Spine
 
 The spine of an ADT is a sum type that is just a list of its constructors.
 
@@ -77,12 +311,12 @@ class HasSpine sop where
 
 Using the Template Haskell, we provide a function `deriveSpine` to automatically derive `HasSpine`.
 
-### DSL
+## DSL
 
 When writing `CEMScript` transitions, we start by describing constraints
 at a high level using a DSL that consists of the following types:
 
-#### TxConstraint
+### TxConstraint
 
 ```haskell
 data TxConstraint (resolved :: Bool) script where
@@ -99,7 +333,7 @@ See the Off-chain machinery section for more details on how this works.
 
 See the reference section for a full reference of `TxConstraint`.
 
-#### ConstraintDSL
+### ConstraintDSL
 
 `ConstraintDSL script value` is a GADT that represents a symbolic expression in the DSL.
 
@@ -113,7 +347,7 @@ It also lets us perform checks (like equality) and apply transformations (like l
 
 See the reference section for a full reference of `ConstraintDSL`.
 
-### DSLValue / DSLPattern
+## DSLValue / DSLPattern
 
 ```haskell
 type family DSLValue (resolved :: Bool) script value where
@@ -270,9 +504,9 @@ The `ResolvedTx` can be used with an instance of `MonadSubmitTx` to submit it to
 
 `MonadSubmitTx` is provided by default for CLB and local cardano node.
 
-## Reference
+# Reference
 
-### TxConstraint
+## TxConstraint
 
 ```haskell
 data TxConstraint (resolved :: Bool) script
@@ -349,7 +583,7 @@ byFlagError flag message = If flag (Error message) Noop
 - `offchainOnly` executes only on chain. Resolve to `Noop` off chain.
 - `byFlagError` evaluates to `Error message` if `flag` evaluates to true.
 
-### ConstraintDSL
+## ConstraintDSL
 
 ```haskell
 data ConstraintDSL script value where
@@ -434,240 +668,4 @@ The following are lifted versions of Plutarch operators
   ConstraintDSL script Value ->
   ConstraintDSL script Value ->
   ConstraintDSL script Value
-```
-
-## Usage and Examples
-
-### How to define a script
-
-- Define an empty type for your script: `data MyScript`, where MyScript can be any name.
-- Define a `CEMScript` instance for it by providing `Params`, `State`, `Transition`, `transitionSpec`, and optionally `transitionComp`.
-- Do Template Haskell derivations (`deriveCEMAssociatedTypes`) to generate data and spine instances for pattern matching.
-- Invoke the `compileCEM` function (e.g., `$(compileCEM True ''MyScript)`) to process the DSL specification, compile optional `transitionComp` code, and produce a `CEMScriptCompiled` instance.
-    - This generates an instance of `CEMScriptCompiled` for your script type.
-    - You may invoke `cemScriptCompiled` on your script type to get an instance of `Plutarch.Script`
-
-### Example: Auction
-
-#### Setup: The Types
-
-First, we define a type to denote our script. It’s an uninhabited type, it can’t be constructed.
-It’s only used as a tag for connecting all instances of type classes together.
-
-```haskell
-data SimpleAuction
-```
-
-We define a type for the read-only state of our script. This state can’t be modified once created.
-This becomes the `Params` associated type of the `CEMScript` type class.
-
-```haskell
-data SimpleAuctionParams = MkAuctionParams
-  { seller :: PubKeyHash,
-    lot :: Value
-  }
-  deriving stock (Prelude.Eq, Prelude.Show)
-```
-
-We define a type for the evolving state of our script. This becomes the `State` associated type of the `CEMScript` type class.
-
-```haskell
-data Bid = MkBid
-  { bidder :: PubKeyHash,
-    bidAmount :: Integer
-  }
-  deriving stock (Prelude.Eq, Prelude.Show)
-
-derivePlutusSpine ''Bid -- This will be explained below.
-
-data SimpleAuctionState
-  = NotStarted
-  | CurrentBid
-      { bid :: Bid
-      }
-  | Winner
-      { bid :: Bid
-      }
-  deriving stock (Prelude.Eq, Prelude.Show)
-```
-
-Lastly, we define a type for the state transitions of our script. This becomes the `Transition` associated type of the `CEMScript` type class.
-
-```haskell
-data SimpleAuctionTransition
-  = Create
-  | Start
-  | MakeBid
-      { bid :: Bid
-      }
-  | Close
-  | Buyout
-  deriving stock (Prelude.Eq, Prelude.Show)
-```
-
-We can now define an instance of the `CEMScriptTypes` for `SimpleAuction`.
-`CEMScriptTypes` is a superclass of `CEMScript`, which just includes the associated types.
-By defining the associated types separately, we can use the `deriveCEMAssociatedTypes`
-Template Haskell function to generate some boilerplate.
-
-```haskell
-instance CEMScriptTypes SimpleAuction where
-  type Params SimpleAuction = SimpleAuctionParams
-  type State SimpleAuction = SimpleAuctionState
-  type Transition SimpleAuction = SimpleAuctionTransition
-
-$(deriveCEMAssociatedTypes False ''SimpleAuction)
-```
-
-`deriveCEMAssociatedTypes` just executes `derivePlutusSpine` for all three of the associated types.
-But it can only do that if all the members of a type have a `HasPlutusSpine` implementation.
-This is why we need to do `derivePlutusSpine` for the `Bid` type ourselves.
-
-The boolean argument to `deriveCEMAssociatedTypes` is unused for now, and it is recommended to use a value of `False`.
-
-#### Implementation
-
-To implement the logic of our script, we define an instance of `CEMScript` for our script type `SimpleAuction`
-
-```haskell
-instance CEMScript SimpleAuction where
-```
-
-We provide a value for `compilationConfig`, which at the moment contains
-only a prefix for error codes to tell errors from different programs apart.
-
-```haskell
-  compilationConfig = MkCompilationConfig "AUC"
-```
-
-Next comes the meat of the script: `transitionSpec`. This is where we define state transitions
-
-We create a Map of `Spine (Transition script)` → `[TxConstraint False script]`
-
-```haskell
-  transitionSpec = Map.fromList
-    [ .. ]
-```
-
-Before we go into the entries in detail, let’s define some helpers:
-
-```haskell
-buyoutBid = ctxState.bid
-
-initialBid =
-  cOfSpine
-    MkBetSpine
-    [ #bidder ::= ctxParams.seller
-    , #bidAmount ::= lift 0
-    ]
-
-auctionValue = cMinLovelace @<> ctxParams.lot
-```
-
-We make extensive use of `OverloadedRecordDot` and custom `HasField` instances to make accessing the fields of the params and state values ergonomic.
-
-Let’s examine each of the entries in the map in detail.
-
-1. Create
-
-    ```haskell
-    ( CreateSpine
-    ,
-      [ spentBy ctxParams.seller cMinLovelace cEmptyValue
-      , output (ownUtxo $ withNullaryState NotStartedSpine) auctionValue
-      ]
-    )
-    ```
-
-2. Start
-
-    ```haskell
-    ( StartSpine
-    ,
-      [ input (ownUtxo $ inState NotStartedSpine) auctionValue
-      , output (ownUtxo $ withState CurrentBidSpine [#bid ::= initialBid]) auctionValue
-      , signedBy ctxParams.seller
-      ]
-    )
-    ```
-
-3. MakeBid
-
-    ```haskell
-    ( MakeBidSpine
-    ,
-      [ input (ownUtxo $ inState CurrentBidSpine) auctionValue
-      , byFlagError
-          (ctxTransition.bid.bidAmount @<= ctxState.bid.bidAmount)
-          "Bid amount is less or equal to current bid"
-      , output
-          ( ownUtxo
-              $ withState
-                CurrentBidSpine
-                [#bid ::= ctxTransition.bid]
-          )
-          auctionValue
-      , signedBy ctxTransition.bid.bidder
-      ]
-    )
-    ```
-
-4. Close
-
-    ```haskell
-    ( CloseSpine
-    ,
-      [ input (ownUtxo $ inState CurrentBidSpine) auctionValue
-      , output
-          ( ownUtxo
-              $ withState WinnerSpine [#bid ::= ctxState.bid]
-          )
-          auctionValue
-      , signedBy ctxParams.seller
-      ]
-    )
-    ```
-
-5. Buyout
-
-    ```haskell
-    ( BuyoutSpine
-    ,
-      [ input (ownUtxo $ inState WinnerSpine) auctionValue
-      , byFlagError (lift False) "Some err"
-      , byFlagError (lift False) "Another err"
-      , -- Example: In constraints redundant for on-chain
-        offchainOnly
-          (if'
-            (ctxParams.seller `eq'` buyoutBid.bidder)
-            (signedBy ctxParams.seller)
-            (spentBy
-              buyoutBid.bidder
-              (cMinLovelace @<> cMkAdaOnlyValue buyoutBid.bidAmount)
-              cEmptyValue
-            )
-          )
-      , output
-          (userUtxo buyoutBid.bidder) -- NOTE: initial zero bidder is seller
-          auctionValue
-      , if'
-          (ctxParams.seller `eq'` buyoutBid.bidder)
-          noop
-          ( output
-            (userUtxo ctxParams.seller)
-            (cMinLovelace @<> cMkAdaOnlyValue buyoutBid.bidAmount)
-          )
-      ]
-    )
-    ```
-
-### Generating state diagram
-
-Use `genCemGraph` function from `Cardano.CEM.Documentation` module
-to produce `graphviz` definition:
-
-```bash
-$ cabal repl cem-script-example
-ghci> :m +System.IO Cardano.CEM CEM.Example.Auction Data.Proxy
-ghci> withFile "auction_diagram.dot" WriteMode (\h -> hPutStrLn h (genCemGraph "CEM Simple Acutoin" (Proxy :: Proxy SimpleAuction)))
 ```
