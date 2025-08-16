@@ -70,6 +70,8 @@ that we use to demonstrate problems:
   * [Game Model](https://github.com/IntersectMBO/plutus-apps/blob/dbafa0ffdc1babcf8e9143ca5a7adde78d021a9a/doc/plutus/tutorials/GameModel.hs)
 * plutus-usecases
 
+# Bugs and problems you can avoid with CEM Script model
+
 ## On-chain correctness
 
 ### Known common vulnerabilities
@@ -205,11 +207,6 @@ Thus it is much harder to miss a constraint to be checked.
 Examples:
 * MinSwap audit - 2.2.1.2 "LP Tokens Can Be Duplicated"
 
-### Logic duplication
-
-There are a bunch of very common tasks shared by multiple dApps,
-which could be tackled generically in a framework like CEM Script.
-
 ## Human-readable specification
 
 Designing, understanding, and auditing any non-trivial dApp
@@ -289,7 +286,7 @@ is required for delegated architectures, including many dApps and Hydra L2.
 Examples:
 * [Indexing in MELD Lending and Borrowing protocol](https://github.com/MELD-labs/cardano-defi-public/tree/eacaa527823031105eba1730f730e1b32f1470bc/lending-index/src/Lending/Index)
 
-## Existing solutions
+# Existing solutions
 
 This section covers some existing approaches that can be
 considered competitive to the project.
@@ -345,7 +342,7 @@ Also, it prohibits any kind of non-trivial state-thread-token logic,
 like optimization by sharing (used for example in `hydra-auction`)
 and multiple commiters schemes (used in `hydra`).
 
-### GeniusYield's Atlas PAB
+## GeniusYield's Atlas PAB
 
 Atlas provides a more humane DX on top of `cardano-api`.
 But it has no features related to the goals of
@@ -361,7 +358,7 @@ Our monad interfaces are meant to be slightly more modular.
 We use much less custom-type wrappers, resorting to Plutus
 types where possible.
 
-### Tweag's cooked-validators
+## Tweag's cooked-validators
 
 The project definitely covers the (production-ready) goal,
 because it was successfully used in real-world audits.
@@ -408,7 +405,7 @@ It seems like this feature is subsumed by
 `quickcheck-dynamic` based model checking specification
 we are going to provide.
 
-### Mutation-based testing of Hydra's validators
+## Mutation-based testing of Hydra's validators
 
 [Hydra mutations](https://abailly.github.io/posts/mutation-testing.html)
 are similar to `cooked-validators` in their design
@@ -416,14 +413,14 @@ and have similar drawbacks.
 Thus they do not cover (synced-by-construction), (secure-by-construction),
 and (declarative-spec) goals.
 
-### tasty-plutus
+## tasty-plutus
 
 This library only covers the (emulate-anything) goal, does not aim to cover others
 and is not being actively developed either.
 On the other hand, it has some interesting low-level features,
 like `plutus-size-check`.
 
-### On-chain PLs
+## On-chain PLs
 
 Any kind of on-chain PL can only cover goals
 (emulate-anything) and (production-readiness).
@@ -453,9 +450,9 @@ and any kind of translations of `cardano-api` to other PLs::
 * [PyCardano](https://pycardano.readthedocs.io/en/latest/guides/plutus.html)
 * [Cardano Multiplatform Lib](https://github.com/dcSpark/cardano-multiplatform-lib)
 
-## Architectural principles
+# Architectural principles
 
-### Constraints design
+## Constraints design
 
 * Generic compilation across:
     * on-chain code
@@ -468,7 +465,7 @@ and any kind of translations of `cardano-api` to other PLs::
     * Best error short-cutting
     * Common security problems prevention
 
-### CEM machine design
+## CEM machine design
 
 As it is done on top of constraints language,
 all their principles and obstacles are affecting CEM as well:
@@ -477,7 +474,7 @@ all their principles and obstacles are affecting CEM as well:
 * Transaction can always be parsed back into CEM transitions
 * Potential non-deterministic on-chain optimizations should not affect
 
-### General Haskell verification tools
+## General Haskell verification tools
 
 The definition of the property we aim to check is simple
 and completely generic:
